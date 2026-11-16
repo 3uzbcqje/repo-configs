@@ -12,16 +12,31 @@ OWNERS=(6j0-org devopscoop 3uzbcqje)
 CODEBERG_HOST=codeberg.org
 RULESET_NAME=default-branch-baseline
 
+# Repos that must accept unsigned commits on the default branch: Flux image
+# automation commits to them without signing.
+UNSIGNED_OK=(6j0-org/worclustershire-deploy)
+
+# signing_required <owner/repo>: prints false for repos in UNSIGNED_OK.
+signing_required() {
+  local r
+  for r in "${UNSIGNED_OK[@]}"; do [[ $1 == "$r" ]] && { echo false; return; }; done
+  echo true
+}
+
 # GitHub repository ruleset for the default branch: no deletion, no force
-# push, signed commits only. No bypass actors, so it applies to admins too.
-RULESET=$(jq -cn --arg name "$RULESET_NAME" '{
-  name: $name,
-  target: "branch",
-  enforcement: "active",
-  bypass_actors: [],
-  conditions: {ref_name: {include: ["~DEFAULT_BRANCH"], exclude: []}},
-  rules: [{type: "deletion"}, {type: "non_fast_forward"}, {type: "required_signatures"}]
-}')
+# push, signed commits only (unless in UNSIGNED_OK). No bypass actors, so it
+# applies to admins too.
+ruleset() {
+  jq -cn --arg name "$RULESET_NAME" --argjson signed "$(signing_required "$1")" '{
+    name: $name,
+    target: "branch",
+    enforcement: "active",
+    bypass_actors: [],
+    conditions: {ref_name: {include: ["~DEFAULT_BRANCH"], exclude: []}},
+    rules: ([{type: "deletion"}, {type: "non_fast_forward"}]
+            + if $signed then [{type: "required_signatures"}] else [] end)
+  }'
+}
 
 usage() { sed -n '2,8s/^# \{0,1\}//p' "$0"; }
 
@@ -86,7 +101,8 @@ gh_vuln_alerts() {
 }
 
 gh_ruleset() {
-  local repo=$1 rulesets id current
+  local repo=$1 rulesets id current want
+  want=$(ruleset "$repo")
   if ! rulesets=$(gh api "repos/$repo/rulesets?includes_parents=false" 2>&1); then
     if [[ $rulesets == *Upgrade* ]]; then
       skip "default branch ruleset (private repos need GitHub Pro)"
@@ -97,14 +113,14 @@ gh_ruleset() {
   fi
   id=$(jq -r --arg n "$RULESET_NAME" '.[] | select(.name == $n) | .id' <<<"$rulesets")
   if [[ -z $id ]]; then
-    change "create ruleset $RULESET_NAME" gh_json POST "repos/$repo/rulesets" "$RULESET"
+    change "create ruleset $RULESET_NAME" gh_json POST "repos/$repo/rulesets" "$want"
     return 0
   fi
   if ! current=$(gh api "repos/$repo/rulesets/$id" 2>&1); then
     fail "get ruleset: $current"
     return 0
   fi
-  if jq -e --argjson want "$RULESET" '
+  if jq -e --argjson want "$want" '
       def norm: {
         enforcement, target,
         bypass: (.bypass_actors // [] | length),
@@ -115,7 +131,7 @@ gh_ruleset() {
       norm == ($want | norm)' <<<"$current" >/dev/null; then
     ok "ruleset $RULESET_NAME"
   else
-    change "update ruleset $RULESET_NAME" gh_json PUT "repos/$repo/rulesets/$id" "$RULESET"
+    change "update ruleset $RULESET_NAME" gh_json PUT "repos/$repo/rulesets/$id" "$want"
   fi
 }
 
@@ -216,6 +232,12 @@ gitlab_project() {
   setting "delete source branch on merge (default)" true \
     jqv .remove_source_branch_after_merge "$p" -- \
     glab api -X PUT "projects/$id" -F remove_source_branch_after_merge=true
+
+  # GitLab's own merge commits are unsigned, so mirrors that require signed
+  # commits reject them. Fast-forward moves the branch to your signed commits.
+  setting "merge method: fast-forward" ff \
+    jqv .merge_method "$p" -- \
+    glab api -X PUT "projects/$id" -f merge_method=ff
 }
 
 run_gitlab() {
@@ -273,23 +295,24 @@ codeberg_token() {
 }
 
 codeberg_repo() {
-  local r=$1 repo branch prot rc
+  local r=$1 repo branch prot rc signed
   repo=$(jq -r .full_name <<<"$r")
+  signed=$(signing_required "$repo")
   branch=$(jq -r .default_branch <<<"$r")
   echo "codeberg: $repo"
 
   prot=$(cb GET "repos/$repo/branch_protections/$(urlenc "$branch")" 2>&1) && rc=0 || rc=$?
   if ((rc == 0)); then
     # Forgejo always rejects force pushes and deletion on a protected branch.
-    setting "$branch: protected, signed commits required (admins too)" "true true" \
+    setting "$branch: protected, signed commits required: $signed (admins too)" "$signed true" \
       jqv '"\(.require_signed_commits) \(.apply_to_admins)"' "$prot" -- \
       cb PATCH "repos/$repo/branch_protections/$(urlenc "$branch")" \
-        '{"require_signed_commits":true,"apply_to_admins":true}'
+        "{\"require_signed_commits\":$signed,\"apply_to_admins\":true}"
   elif ((rc == 4)); then
-    change "protect $branch (no force push/deletion, signed commits required)" \
+    change "protect $branch (no force push/deletion, signed commits required: $signed)" \
       cb POST "repos/$repo/branch_protections" \
-        "$(jq -cn --arg b "$branch" '{rule_name: $b, enable_push: true,
-            require_signed_commits: true, apply_to_admins: true}')"
+        "$(jq -cn --arg b "$branch" --argjson s "$signed" '{rule_name: $b, enable_push: true,
+            require_signed_commits: $s, apply_to_admins: true}')"
   else
     fail "get branch protection: $prot"
   fi
