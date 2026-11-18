@@ -22,7 +22,7 @@ any API call failed.
 | Default branch protected | ✅ ruleset | ✅ protected branch | ✅ branch protection |
 | No force push to default branch | ✅ | ✅ | ✅ always, when protected |
 | No deleting the default branch | ✅ | ✅ | ✅ always, when protected |
-| Signed commits required² | ✅ | ❌ Premium only | ✅ |
+| Signed commits required | ❌ turned off | ❌ not set | ❌ turned off |
 | Applies to admins too | ✅ no bypass actors | ✅ | ✅ `apply_to_admins` |
 | Delete branch after merge | ✅ | default only¹ | default only¹ |
 | Fast-forward merges only (no unsigned merge commits) | — | ✅ | — |
@@ -36,10 +36,6 @@ any API call failed.
 ¹ Only sets whether the "delete source branch" checkbox starts ticked on new
 merge requests.
 
-² Except repos listed in `UNSIGNED_OK` (`6j0-org/worclustershire-deploy`),
-where Flux image automation commits without signing. Their other protections
-still apply.
-
 Direct pushes to the default branch are still allowed; PRs are not required.
 
 ### Limits
@@ -47,13 +43,10 @@ Direct pushes to the default branch are still allowed; PRs are not required.
 - **GitHub private repos** on a Free account can't use rulesets or branch
   protection at all (`3uzbcqje/resume`, `3uzbcqje/home`). The script skips them
   with a note. Making them public or upgrading to GitHub Pro would fix that.
-- **Signed commits** only pass if your signing key is uploaded to each platform,
-  which it already is. On GitHub, merge PRs with *squash* or *merge commit*,
-  which GitHub signs. *Rebase and merge* creates unsigned commits and will be
-  rejected. On GitLab the script sets the merge method to *fast-forward*,
-  because GitLab's merge commits are unsigned and get rejected by mirrors that
-  require signed commits. Rebase locally and push before merging; GitLab's
-  *Rebase* button and *squash* both create unsigned commits.
+- **Signed commits** aren't required anywhere. On GitHub the script removes
+  the `required_signatures` rule from its ruleset, and on Codeberg it sets
+  `require_signed_commits` to false. Unsigned commits, including Flux image
+  automation commits and *Rebase and merge* on GitHub, are accepted.
 - **Immutable releases** (GitHub) lock a release's tag and assets once it is
   published. Plain tags that have no release attached aren't affected.
 - **New repos** aren't covered until you run the script again.
