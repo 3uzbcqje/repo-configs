@@ -88,6 +88,19 @@ gh_vuln_alerts() {
   if gh api "repos/$1/vulnerability-alerts" >/dev/null 2>&1; then echo true; else echo false; fi
 }
 
+gh_watching() {
+  # Prints "<subscribed> <ignored>"; the API returns 404 when not watching.
+  local out
+  if out=$(gh api "repos/$1/subscription" --jq '"\(.subscribed) \(.ignored)"' 2>&1); then
+    echo "$out"
+  elif [[ $out == *'HTTP 404'* ]]; then
+    echo "false false"
+  else
+    echo "$out"
+    return 1
+  fi
+}
+
 gh_ruleset() {
   local repo=$1 rulesets id current want
   want=$(ruleset)
@@ -152,6 +165,14 @@ github_repo() {
     gh_json PUT "repos/$repo/actions/permissions/workflow" \
       '{"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}'
 
+  # Default notifications: not watching or ignoring ("Participating and
+  # @mentions"). Watching only offers All Activity via the API, which is noisy.
+  if $GH_CAN_WATCH; then
+    setting "notifications: participating and @mentions (not watching)" "false false" \
+      gh_watching "$repo" -- \
+      gh api -X DELETE "repos/$repo/subscription"
+  fi
+
   # Free plans only offer these on public repos.
   if [[ $(jq -r .private <<<"$info") == true ]]; then
     skip "secret scanning, private vuln reporting, fork PR approval (public repos only)"
@@ -177,6 +198,12 @@ github_repo() {
 
 run_github() {
   local owner line repo
+  # The watch API needs the notifications token scope; check once up front.
+  GH_CAN_WATCH=true
+  if ! gh api 'notifications?per_page=1' >/dev/null 2>&1; then
+    GH_CAN_WATCH=false
+    fail "github: can't manage repo watching; run: gh auth refresh -h github.com -s notifications"
+  fi
   for owner in "${OWNERS[@]}"; do
     while read -r -u 3 line; do
       repo=${line%% *}
@@ -193,12 +220,19 @@ run_github() {
 # --- GitLab ------------------------------------------------------------------
 urlenc() { jq -rn --arg s "$1" '$s | @uri'; }
 
+gl_notify_level() { glab api "projects/$1/notification_settings" | jq -r .level; }
+
 gitlab_project() {
   local p=$1 id path branch prot
   id=$(jq -r .id <<<"$p")
   path=$(jq -r .path_with_namespace <<<"$p")
   branch=$(jq -r '.default_branch // empty' <<<"$p")
   echo "gitlab: $path"
+
+  # Default notifications: follow the account-wide level.
+  setting "notifications: global (account default)" global \
+    gl_notify_level "$id" -- \
+    glab api -X PUT "projects/$id/notification_settings" -f level=global
 
   if [[ -z $branch ]]; then
     skip "empty repository"
@@ -275,10 +309,27 @@ cb() {
 codeberg_token() {
   [[ -n ${CODEBERG_TOKEN:-} ]] && return 0
   # Any authenticated fj call refreshes its stored OAuth token if it expired.
-  fj -H "$CODEBERG_HOST" whoami >/dev/null
+  # Run it outside this repo: fj parses the cwd's git remotes even with -H and
+  # fails on non-URL-like ones (e.g. rad://).
+  (cd / && fj -H "$CODEBERG_HOST" whoami >/dev/null) ||
+    echo "codeberg: 'fj whoami' failed; the stored token may be expired" >&2
   CODEBERG_TOKEN=$(jq -r --arg h "$CODEBERG_HOST" '.hosts[$h].token // empty' \
     "${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json")
   [[ -n $CODEBERG_TOKEN ]] || { echo "codeberg: no token; set CODEBERG_TOKEN or run 'fj auth login'" >&2; return 1; }
+}
+
+cb_watching() {
+  # Prints "<subscribed> <ignored>"; the API returns 404 when not watching.
+  local out rc
+  out=$(cb GET "repos/$1/subscription" 2>&1) && rc=0 || rc=$?
+  if ((rc == 0)); then
+    jqv '"\(.subscribed) \(.ignored)"' "$out"
+  elif ((rc == 4)); then
+    echo "false false"
+  else
+    echo "$out"
+    return 1
+  fi
 }
 
 codeberg_repo() {
@@ -286,6 +337,11 @@ codeberg_repo() {
   repo=$(jq -r .full_name <<<"$r")
   branch=$(jq -r .default_branch <<<"$r")
   echo "codeberg: $repo"
+
+  # Default notifications: watching, which Forgejo sets on repos you create.
+  setting "notifications: watching (Forgejo default)" "true false" \
+    cb_watching "$repo" -- \
+    cb PUT "repos/$repo/subscription"
 
   prot=$(cb GET "repos/$repo/branch_protections/$(urlenc "$branch")" 2>&1) && rc=0 || rc=$?
   if ((rc == 0)); then
