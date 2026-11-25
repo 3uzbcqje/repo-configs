@@ -151,13 +151,14 @@ github_repo() {
     gh api "repos/$repo/immutable-releases" --jq .enabled -- \
     gh api -X PUT "repos/$repo/immutable-releases"
 
-  setting "dependabot alerts" true \
-    gh_vuln_alerts "$repo" -- \
-    gh api -X PUT "repos/$repo/vulnerability-alerts"
-
-  setting "dependabot security updates" true \
+  # Dependabot off. Security updates depend on alerts, so disable them first.
+  setting "dependabot security updates disabled" false \
     gh api "repos/$repo/automated-security-fixes" --jq .enabled -- \
-    gh api -X PUT "repos/$repo/automated-security-fixes"
+    gh api -X DELETE "repos/$repo/automated-security-fixes"
+
+  setting "dependabot alerts disabled" false \
+    gh_vuln_alerts "$repo" -- \
+    gh api -X DELETE "repos/$repo/vulnerability-alerts"
 
   setting "actions: read-only GITHUB_TOKEN, can't approve PRs" "read false" \
     gh api "repos/$repo/actions/permissions/workflow" \
